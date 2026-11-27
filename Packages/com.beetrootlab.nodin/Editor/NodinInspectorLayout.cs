@@ -9,6 +9,7 @@ namespace Nodin.Editor
     internal static class NodinInspectorLayout
     {
         private static GUIStyle _tabLabel;
+        private static GUIStyle _foldoutPanel;
 
         private sealed class Group
         {
@@ -273,19 +274,57 @@ namespace Nodin.Editor
         private static void DrawGroup(NodinPropertyNode parent, Group group)
         {
             var foldouts = group.Options.OfType<FoldoutGroupAttribute>().ToArray();
-            if (foldouts.Length > 0)
+            if (foldouts.Length == 0)
             {
-                var key = group.Path + ":foldout";
-                var expanded = parent.Tree.State(key, foldouts.Any(foldout => foldout.Expanded));
-                var name = foldouts.Select(foldout => foldout.GroupName).FirstOrDefault(text => text != null) ?? group.Name;
-                bool next;
-                using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
-                    next = EditorGUILayout.Foldout(expanded, parent.Text(name, parent.GroupOwner), true);
-                parent.Tree.SetState(key, next);
-                if (!expanded)
-                    return;
+                DrawGroupContents(parent, group);
+                return;
             }
 
+            var key = group.Path + ":foldout";
+            var expanded = parent.Tree.State(key, foldouts.Any(foldout => foldout.Expanded));
+            var name = foldouts.Select(foldout => foldout.GroupName).FirstOrDefault(text => text != null) ?? group.Name;
+            var panel = _foldoutPanel ??= new GUIStyle(EditorStyles.helpBox)
+            {
+                padding = new RectOffset(4, 4, 1, 3)
+            };
+            using var scope = new EditorGUILayout.VerticalScope(panel);
+
+            // The Inspector normally places foldout arrows in the left gutter.
+            var previousHierarchyMode = EditorGUIUtility.hierarchyMode;
+            EditorGUIUtility.hierarchyMode = false;
+            try
+            {
+                var next = DrawFoldoutHeader(expanded, parent.Text(name, parent.GroupOwner), panel.padding);
+                parent.Tree.SetState(key, next);
+                // Keep the current layout while Unity consumes the click.
+                if (expanded)
+                    DrawGroupContents(parent, group);
+            }
+            finally { EditorGUIUtility.hierarchyMode = previousHierarchyMode; }
+        }
+
+        private static bool DrawFoldoutHeader(bool expanded, string name, RectOffset panelPadding)
+        {
+            var row = EditorGUILayout.GetControlRect(false, EditorGUIUtility.singleLineHeight + 3, GUIStyle.none);
+            if (Event.current.type == EventType.Repaint)
+            {
+                var face = Rect.MinMaxRect(row.xMin - panelPadding.left + 1, row.yMin,
+                    row.xMax + panelPadding.right - 1, row.yMax);
+                var tint = EditorGUIUtility.isProSkin ? new Color(1, 1, 1, 0.05f) : new Color(0, 0, 0, 0.04f);
+                EditorGUI.DrawRect(face, tint);
+                EditorGUI.DrawRect(new Rect(face.x, face.yMax - 1, face.width, 1), new Color(0, 0, 0, 0.3f));
+            }
+
+            row.xMin += 3;
+            var previousLabelWidth = EditorGUIUtility.labelWidth;
+            using var indent = new EditorGUI.IndentLevelScope(-EditorGUI.indentLevel);
+            EditorGUIUtility.labelWidth = Mathf.Max(1, row.width - EditorStyles.foldout.margin.horizontal);
+            try { return EditorGUI.Foldout(row, expanded, name, true); }
+            finally { EditorGUIUtility.labelWidth = previousLabelWidth; }
+        }
+
+        private static void DrawGroupContents(NodinPropertyNode parent, Group group)
+        {
             var title = group.Options.OfType<TitleGroupAttribute>().ToArray();
             if (title.Length > 0)
                 NodinPropertyNode.DrawTitle(parent.Text(group.Name, parent.GroupOwner),

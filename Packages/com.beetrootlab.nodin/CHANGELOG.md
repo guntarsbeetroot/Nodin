@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- `FoldoutGroup` arrows now stay inside their headers, and expanded panels enclose their nested groups.
 - Foldout arrows now stay inside `TabGroup` panels.
 - Adjacent tabs in a `TabGroup` share a single divider.
 
