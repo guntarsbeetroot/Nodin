@@ -1,0 +1,7 @@
+{
+  "name": "Nodin.Editor",
+  "rootNamespace": "Nodin.Editor",
+  "includePlatforms": [
+    "Editor"
+  ]
+}

@@ -1,0 +1,16 @@
+# Changelog
+
+## [Unreleased]
+
+### Changed
+
+- Standardized type names on the Nodin prefix. Custom integrations using the renamed types must update their references, including `NodinWindow`, `NodinPropertyTree`, `NodinInspectorExtensions`, and `INodinDropdownItem`.
+
+## [1.0.0]
+
+### Added
+
+- Attribute-driven IMGUI inspectors with layout groups, conditional controls, validation, collection editors, and method buttons.
+- Editor windows, property trees, and registration hooks for custom drawers and panels.
+- Build validation that keeps Nodin assemblies and package assets out of player builds.
+- MIT licensing and links to release notes and license information in Unity Package Manager.

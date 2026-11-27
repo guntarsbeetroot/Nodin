@@ -1,0 +1,11 @@
+{
+  "dependencies": {
+    "com.unity.ide.rider": "3.0.40",
+    "com.unity.test-framework": "1.6.0",
+    "com.unity.modules.unityanalytics": "1.0.0",
+    "com.unity.pipeline": "1.0.1"
+  },
+  "testables": [
+    "com.beetrootlab.nodin"
+  ]
+}

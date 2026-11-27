@@ -1,0 +1,14 @@
+{
+  "name": "com.beetrootlab.nodin",
+  "version": "1.0.0",
+  "displayName": "Nodin",
+  "description": "Editor-only attribute-driven Unity inspectors and windows built on Unity serialization.",
+  "unity": "6000.3",
+  "license": "MIT",
+  "author": {
+    "name": "Guntars Polis"
+  },
+  "dependencies": {
+    "com.unity.nuget.mono-cecil": "1.11.6"
+  }
+}

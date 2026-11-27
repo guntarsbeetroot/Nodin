@@ -1,0 +1,9 @@
+{
+  "name": "Nodin.Tests.Fixtures",
+  "rootNamespace": "Nodin.Editor.Tests",
+  "includePlatforms": ["Editor"],
+  "overrideReferences": true,
+  "precompiledReferences": ["Nodin.dll", "nunit.framework.dll"],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "autoReferenced": false
+}
