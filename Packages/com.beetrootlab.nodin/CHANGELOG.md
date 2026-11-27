@@ -5,6 +5,7 @@
 ### Changed
 
 - Standardized type names on the Nodin prefix. Custom integrations using the renamed types must update their references, including `NodinWindow`, `NodinPropertyTree`, `NodinInspectorExtensions`, and `INodinDropdownItem`.
+- `Toggle` now draws a full-width header with a separate checkbox and foldout, and applies `GUIColor` to the header.
 
 ## [1.0.0]
 

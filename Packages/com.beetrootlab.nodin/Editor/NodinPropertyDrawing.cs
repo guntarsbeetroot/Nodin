@@ -515,55 +515,105 @@ namespace Nodin.Editor
             var inline = GetAttribute<InlinePropertyAttribute>() != null;
             var toggle = GetAttribute<ToggleAttribute>();
             var toggleChild = toggle != null ? Children.FirstOrDefault(child => child.Name == toggle.Member) : null;
+            var hasToggle = toggleChild?.Value is bool;
             var key = Path + ":nested";
             var expanded = inline || (property?.isExpanded ?? _tree.State(key, false));
-            void Store(bool next)
+            var next = expanded;
+            if (!inline && label == GUIContent.none)
+                label = new GUIContent(ObjectNames.NicifyVariableName(Name));
+
+            if (hasToggle)
+                next = DrawToggleHeader(toggleChild, label, inline, expanded);
+            else if (!inline)
+                next = EditorGUILayout.Foldout(expanded, label, true);
+            else if (label != GUIContent.none)
+                EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+
+            if (next != expanded)
             {
                 if (property != null)
                     property.isExpanded = next;
                 else
                     _tree.SetState(key, next);
+                // Keep the layout from the current event until the next Layout pass.
+                if (Event.current.type != EventType.Used)
+                    expanded = next;
             }
 
-            if (!inline || toggleChild != null)
+            if (expanded)
             {
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    if (toggleChild?.Value is bool enabled)
-                    {
-                        if (toggleChild.IsVisible())
-                            DrawToggle(toggleChild, enabled);
-                    }
-
-                    if (!inline)
-                    {
-                        var next = EditorGUILayout.Foldout(expanded,
-                            label == GUIContent.none ? new GUIContent(ObjectNames.NicifyVariableName(Name)) : label, true);
-                        Store(next);
-                        if (Event.current.type != EventType.Used)
-                            expanded = next;
-                    }
-                    else if (label != GUIContent.none)
-                        EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
-                }
+                if (hasToggle)
+                    GUILayout.Space(3);
+                using var indent = new EditorGUI.IndentLevelScope(inline ? 0 : 1);
+                var children = Children.Where(child => !hasToggle || child.Path != toggleChild.Path);
+                if (GetAttribute<SearchableAttribute>() is { } search)
+                    children = NodinCollections.FilterChildren(this, children, search);
+                var previous = _tree.EditsDisabled;
+                _tree.EditsDisabled = previous || hasToggle &&
+                    (toggleChild.Value is false || toggleChild.SerializedProperty?.hasMultipleDifferentValues == true);
+                try { NodinInspectorLayout.Draw(this, children); }
+                finally { _tree.EditsDisabled = previous; }
             }
-            else if (label != GUIContent.none)
-                EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
-
-            if (!expanded)
-                return;
-
-            using var indent = new EditorGUI.IndentLevelScope(inline ? 0 : 1);
-            var children = Children.Where(child => toggleChild == null || child.Path != toggleChild.Path);
-            if (GetAttribute<SearchableAttribute>() is { } search)
-                children = NodinCollections.FilterChildren(this, children, search);
-            var previous = _tree.EditsDisabled;
-            _tree.EditsDisabled = previous || toggleChild?.Value is false || toggleChild?.SerializedProperty?.hasMultipleDifferentValues == true;
-            try { NodinInspectorLayout.Draw(this, children); }
-            finally { _tree.EditsDisabled = previous; }
+            if (hasToggle)
+                GUILayout.Space(4);
         }
 
-        private void DrawToggle(NodinPropertyNode toggle, bool enabled)
+        private static GUIStyle _toggleHeaderLabel;
+        private static GUIStyle _toggleHeaderArrow;
+        private static readonly GUIContent ExpandedToggleArrow = new GUIContent("▼");
+        private static readonly GUIContent CollapsedToggleArrow = new GUIContent("◀");
+
+        private bool DrawToggleHeader(NodinPropertyNode toggle, GUIContent label, bool inline, bool expanded)
+        {
+            var lineHeight = EditorGUIUtility.singleLineHeight;
+            var row = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect(false, lineHeight + 1));
+            using var indent = new EditorGUI.IndentLevelScope(-EditorGUI.indentLevel);
+            _toggleHeaderLabel ??= new GUIStyle(EditorStyles.miniLabel)
+            {
+                clipping = TextClipping.Clip,
+                padding = new RectOffset(1, 19, 0, 0)
+            };
+            _toggleHeaderArrow ??= new GUIStyle(EditorStyles.miniLabel)
+            {
+                alignment = TextAnchor.MiddleCenter
+            };
+
+            if (Event.current.type == EventType.Repaint)
+            {
+                var shadow = row;
+                shadow.y += 2;
+                GUI.DrawTexture(shadow, Texture2D.whiteTexture, ScaleMode.StretchToFill, true,
+                    0, new Color(0, 0, 0, 0.2f * GUI.color.a), 0, 3);
+                var shade = EditorGUIUtility.isProSkin ? 0.34f : 0.8f;
+                GUI.DrawTexture(row, Texture2D.whiteTexture, ScaleMode.StretchToFill, true,
+                    0, GUI.color * new Color(shade, shade, shade), 0, 3);
+            }
+
+            var showToggle = toggle.IsVisible();
+            if (showToggle)
+            {
+                var check = new Rect(row.x + 3, row.center.y - lineHeight / 2, 16, lineHeight);
+                DrawToggle(check, toggle, (bool)toggle.Value);
+            }
+
+            var labelRect = row;
+            labelRect.xMin = Mathf.Min(row.xMax, row.x + (showToggle ? 19 : 5));
+            if (inline)
+            {
+                GUI.Label(labelRect, label, _toggleHeaderLabel);
+                return true;
+            }
+
+            // Expanding a row should not register as an edit to the inspected value.
+            var changed = GUI.changed;
+            var next = GUI.Toggle(labelRect, expanded, label, _toggleHeaderLabel);
+            GUI.changed = changed;
+            var arrow = new Rect(row.xMax - 19, row.y, 14, row.height);
+            GUI.Label(arrow, expanded ? ExpandedToggleArrow : CollapsedToggleArrow, _toggleHeaderArrow);
+            return next;
+        }
+
+        private void DrawToggle(Rect rect, NodinPropertyNode toggle, bool enabled)
         {
             using var disabled = new EditorGUI.DisabledScope(_tree.EditsDisabled || toggle.IsDisabled());
             var previous = EditorGUI.showMixedValue;
@@ -571,7 +621,6 @@ namespace Nodin.Editor
             EditorGUI.showMixedValue = property?.hasMultipleDifferentValues == true;
             try
             {
-                var rect = EditorGUILayout.GetControlRect(false, GUILayout.Width(18));
                 var label = new GUIContent("", toggle.InspectorLabel.text);
                 var before = toggle.SnapshotValues();
                 if (property != null)
@@ -580,16 +629,16 @@ namespace Nodin.Editor
                 {
                     using var change = new EditorGUI.ChangeCheckScope();
                     var next = EditorGUI.Toggle(rect, label, enabled);
-                    if (change.changed)
-                        toggle.Value = next;
+                    if (!change.changed)
+                        return;
+                    toggle.Value = next;
                 }
                 finally
                 {
                     if (property != null)
                         EditorGUI.EndProperty();
                 }
-                if (before != null && GUI.changed)
-                    toggle.NotifyChanged(before);
+                toggle.NotifyChanged(before);
             }
             finally { EditorGUI.showMixedValue = previous; }
         }
