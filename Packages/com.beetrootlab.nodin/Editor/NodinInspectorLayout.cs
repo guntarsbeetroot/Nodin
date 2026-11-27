@@ -148,22 +148,7 @@ namespace Nodin.Editor
 
             if (group.IsTabs)
             {
-                using var panel = new EditorGUILayout.VerticalScope(EditorStyles.helpBox);
-                var pages = rows.Where(row => row.Group != null).ToArray();
-                if (pages.Length > 0)
-                {
-                    var key = group.Path + ":tab";
-                    var selected = Array.FindIndex(pages, row => row.Group.Name == parent.Tree.State(key, ""));
-                    selected = Math.Max(0, selected);
-                    var next = DrawTabs(selected, pages.Select(row => row.Group.Name).ToArray());
-                    var page = pages[Mathf.Clamp(next, 0, pages.Length - 1)];
-                    parent.Tree.SetState(key, page.Group.Name);
-                    if (Event.current.type == EventType.Used && next != selected)
-                        page = pages[selected];
-                    DrawGroup(parent, page.Group);
-                }
-                foreach (var row in rows.Where(row => row.Group == null))
-                    row.Node.Draw();
+                DrawTabGroup(parent, group, rows);
                 return;
             }
 
@@ -192,6 +177,33 @@ namespace Nodin.Editor
 
             foreach (var row in rows)
                 DrawRow(parent, row);
+        }
+
+        private static void DrawTabGroup(NodinPropertyNode parent, Group group, Row[] rows)
+        {
+            using var panel = new EditorGUILayout.VerticalScope(EditorStyles.helpBox);
+            var pages = rows.Where(row => row.Group != null).ToArray();
+            Group page = null;
+            if (pages.Length > 0)
+            {
+                var key = group.Path + ":tab";
+                var selected = Math.Max(0, Array.FindIndex(pages, row => row.Group.Name == parent.Tree.State(key, "")));
+                var next = DrawTabs(selected, pages.Select(row => row.Group.Name).ToArray());
+                parent.Tree.SetState(key, pages[next].Group.Name);
+                page = pages[Event.current.type == EventType.Used ? selected : next].Group;
+            }
+
+            // Hierarchy mode puts Unity's foldout arrows in the left gutter, outside the tab panel.
+            var previousHierarchyMode = EditorGUIUtility.hierarchyMode;
+            EditorGUIUtility.hierarchyMode = false;
+            try
+            {
+                if (page != null)
+                    DrawGroup(parent, page);
+                foreach (var row in rows.Where(row => row.Group == null))
+                    row.Node.Draw();
+            }
+            finally { EditorGUIUtility.hierarchyMode = previousHierarchyMode; }
         }
 
         private static int DrawTabs(int selected, string[] names)
