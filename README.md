@@ -42,13 +42,17 @@ public sealed class NodinBuildExample : MonoBehaviour
 
 Nodin applies automatically in fallback inspectors for `MonoBehaviour` and `ScriptableObject`. For an existing custom inspector or Editor window, see the [package guide](Packages/com.beetrootlab.nodin/README.md).
 
+## Examples
+
+Import **Attribute Examples** from Nodin’s **Samples** section in Unity Package Manager. Open **Window > Nodin > Attribute Examples** to try the controls and prefab contexts. See the [sample source index](<Packages/com.beetrootlab.nodin/Samples~/Attribute Examples/README.md>).
+
 ## Develop and test
 
 Open the repository root in Unity **6000.3.20f1**. The project loads Nodin as an embedded package, and the default standalone build uses an empty scene to verify player isolation.
 
 Track user-facing changes under **Unreleased** in the [package changelog](Packages/com.beetrootlab.nodin/CHANGELOG.md). When releasing, group those changes under the version in `package.json`.
 
-After changing [InspectorAttributes.cs](Packages/com.beetrootlab.nodin/Source~/InspectorAttributes.cs), run `bash Tools/build-nodin-attributes.sh` from the repository root. Commit the rebuilt `Runtime/Nodin.dll` alongside the source. The script uses the compiler bundled with the project's Unity version.
+After changing the [attribute sources](Packages/com.beetrootlab.nodin/Source~), run `bash Tools/build-nodin-attributes.sh` from the repository root. Commit the rebuilt `Runtime/Nodin.dll` alongside the source. The script uses the compiler bundled with the project's Unity version.
 
 To run the tests, open **Window → General → Test Runner → EditMode**, or run these Unity CLI commands from the repository root with the Editor open. The CLI command also runs the explicit player-isolation test.
 

@@ -1,6 +1,6 @@
 {
   "name": "com.beetrootlab.nodin",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "displayName": "Nodin",
   "description": "Editor-only attribute-driven Unity inspectors and windows built on Unity serialization.",
   "unity": "6000.3",
@@ -8,6 +8,13 @@
   "author": {
     "name": "Guntars Polis"
   },
+  "samples": [
+    {
+      "displayName": "Attribute Examples",
+      "description": "Explore Nodin attributes in an example browser, with prefab and scene demonstrations.",
+      "path": "Samples~/Attribute Examples"
+    }
+  ],
   "dependencies": {
     "com.unity.nuget.mono-cecil": "1.11.6"
   }

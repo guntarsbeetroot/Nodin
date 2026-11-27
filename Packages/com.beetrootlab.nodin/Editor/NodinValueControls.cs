@@ -100,7 +100,7 @@ namespace Nodin.Editor
                     }
                     if (GUI.Button(browse, new GUIContent("…", "Browse")))
                     {
-                        var chosen = ChoosePath(property.stringValue, path);
+                        var chosen = ChoosePath(node, property.stringValue, path);
                         if (!string.IsNullOrEmpty(chosen))
                         {
                             property.stringValue = chosen;
@@ -137,10 +137,9 @@ namespace Nodin.Editor
             finally { EditorGUI.EndProperty(); }
         }
 
-        private static string ChoosePath(string current, NodinPathAttribute attribute)
+        internal static string ChoosePath(NodinPropertyNode node, string current, NodinPathAttribute attribute)
         {
-            var project = Path.GetDirectoryName(Application.dataPath);
-            var parent = Path.GetFullPath(Path.Combine(project, attribute.ParentFolder ?? ""));
+            var (project, parent) = PathRoots(node, attribute);
             var initial = GetInitialPath(project, parent, current);
             if (File.Exists(initial))
                 initial = Path.GetDirectoryName(initial);
@@ -150,16 +149,40 @@ namespace Nodin.Editor
             string path;
             if (attribute is FilePathAttribute file)
             {
-                path = string.IsNullOrWhiteSpace(file.Extensions)
+                var extensions = node.Text(file.Extensions);
+                path = string.IsNullOrWhiteSpace(extensions)
                     ? EditorUtility.OpenFilePanel("Select file", initial, "")
-                    : EditorUtility.OpenFilePanelWithFilters("Select file", initial, new[] { "Supported files", file.Extensions });
+                    : EditorUtility.OpenFilePanelWithFilters("Select file", initial, new[] { "Supported files", extensions });
             }
             else
                 path = EditorUtility.OpenFolderPanel("Select folder", initial, "");
 
             if (string.IsNullOrEmpty(path))
                 return null;
-            return StorePath(project, parent, current, path, attribute.AbsolutePath);
+            var stored = StorePath(project, parent, current, path, attribute.AbsolutePath);
+            return attribute.UseBackslashes ? stored.Replace('/', '\\') : stored.Replace('\\', '/');
+        }
+
+        internal static bool PathExists(NodinPropertyNode node, string current, NodinPathAttribute attribute)
+        {
+            if (string.IsNullOrWhiteSpace(current))
+                return false;
+            try
+            {
+                var (project, parent) = PathRoots(node, attribute);
+                var full = GetInitialPath(project, parent, current);
+                return attribute is FilePathAttribute ? File.Exists(full) : Directory.Exists(full);
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        private static (string project, string parent) PathRoots(NodinPropertyNode node, NodinPathAttribute attribute)
+        {
+            var project = Path.GetDirectoryName(Application.dataPath);
+            return (project, Path.GetFullPath(Path.Combine(project, node.Text(attribute.ParentFolder) ?? "")));
         }
 
         private static bool UsesAssetPath(string path) => path == "Assets" || path == "Packages" ||

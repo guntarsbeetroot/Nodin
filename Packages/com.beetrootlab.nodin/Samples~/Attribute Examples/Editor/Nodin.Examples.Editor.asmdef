@@ -1,0 +1,6 @@
+{
+  "name": "Nodin.Examples.Editor",
+  "rootNamespace": "Nodin.Examples",
+  "references": ["Nodin.Editor", "Nodin.Examples"],
+  "includePlatforms": ["Editor"]
+}

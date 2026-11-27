@@ -38,7 +38,8 @@ namespace Nodin.Editor
             internal float Order;
             internal int Index;
             internal float Width;
-            internal bool Visible => Node?.IsVisible() ?? Group.Rows.Any(row => row.Visible);
+            internal bool Visible(NodinPropertyNode parent) =>
+                Node?.IsVisible() ?? (GroupVisible(parent, Group) && Group.Rows.Any(row => row.Visible(parent)));
         }
 
         internal static void Draw(NodinPropertyNode parent, IEnumerable<NodinPropertyNode> children)
@@ -143,9 +144,40 @@ namespace Nodin.Editor
             destination.Rows.Add(new Row { Node = node, Order = order, Index = index, Width = width });
         }
 
-        private static void DrawRows(NodinPropertyNode parent, Group group)
+        private static bool GroupVisible(NodinPropertyNode parent, Group group)
         {
-            var rows = group.Rows.Where(row => row.Visible).OrderBy(row => row.Order).ThenBy(row => row.Index).ToArray();
+            try
+            {
+                return parent.Tree.Targets.Any(target => GroupMatches(parent.GroupOwnerOf(target), group));
+            }
+            catch (Exception)
+            {
+                return true;
+            }
+        }
+
+        private static bool GroupMatches(object owner, Group group)
+        {
+            foreach (var option in group.Options)
+            {
+                var (condition, expected, explicitValue, show) = option switch
+                {
+                    ShowIfGroupAttribute visible => (visible.Condition, visible.Value, visible.HasValue, true),
+                    HideIfGroupAttribute hidden => (hidden.Condition, hidden.Value, hidden.HasValue, false),
+                    _ => (null, null, false, false)
+                };
+                if (option is not ShowIfGroupAttribute and not HideIfGroupAttribute)
+                    continue;
+                var result = NodinExpression.Evaluate(owner, condition ?? group.Name);
+                if ((explicitValue ? NodinExpression.Equal(result, expected) : NodinExpression.Truth(result)) != show)
+                    return false;
+            }
+            return true;
+        }
+
+        private static void DrawRows(NodinPropertyNode parent, Group group, string excludePath = null)
+        {
+            var rows = group.Rows.Where(row => (excludePath == null || row.Node?.Path != excludePath) && row.Visible(parent)).OrderBy(row => row.Order).ThenBy(row => row.Index).ToArray();
             if (rows.Length == 0)
                 return;
 
@@ -155,12 +187,48 @@ namespace Nodin.Editor
                 return;
             }
 
+            if (group.Options.OfType<ResponsiveButtonGroupAttribute>().FirstOrDefault() is { } responsive)
+            {
+                var measured = GUILayoutUtility.GetRect(0, 1, GUILayout.ExpandWidth(true));
+                var key = group.Path + ":responsive-width";
+                var width = parent.Tree.State(key, Mathf.Max(1, EditorGUIUtility.currentViewWidth - 40));
+                if (Event.current.type == EventType.Repaint && measured.width > 1 && Mathf.Abs(measured.width - width) > 1)
+                {
+                    parent.Tree.SetState(key, measured.width);
+                    UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
+                }
+                var columnsKey = group.Path + ":responsive-columns";
+                if (Event.current.type == EventType.Layout)
+                    parent.Tree.SetState(columnsKey, Mathf.Max(1, Mathf.FloorToInt(width / Mathf.Max(24, responsive.DefaultButtonSize))));
+                var columns = Math.Min(rows.Length, parent.Tree.State(columnsKey, 1));
+                for (var start = 0; start < rows.Length; start += columns)
+                {
+                    using var line = new EditorGUILayout.HorizontalScope();
+                    var end = Math.Min(rows.Length, start + columns);
+                    for (var i = start; i < end; i++)
+                    {
+                        using var cell = new EditorGUILayout.VerticalScope(GUILayout.ExpandWidth(true));
+                        DrawRow(parent, rows[i]);
+                    }
+                }
+                return;
+            }
+
             if (group.Options.Any(option => option is HorizontalGroupAttribute or ButtonGroupAttribute))
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     foreach (var row in rows)
                     {
+                        var option = row.Node?.GetAttribute<HorizontalGroupAttribute>() ??
+                                     row.Group?.Options.OfType<HorizontalGroupAttribute>().FirstOrDefault();
+                        var view = Mathf.Max(0, EditorGUIUtility.currentViewWidth - 40);
+                        var marginLeft = HorizontalDistance(option?.MarginLeft ?? 0, view);
+                        var marginRight = HorizontalDistance(option?.MarginRight ?? 0, view);
+                        if (row != rows[0])
+                            GUILayout.Space(Mathf.Max(0, group.Options.OfType<HorizontalGroupAttribute>().Max(item => (float?)item.Gap) ?? 0));
+                        if (marginLeft > 0)
+                            GUILayout.Space(marginLeft);
                         var width = row.Width is > 0 and <= 1
                             ? Mathf.Max(24, (EditorGUIUtility.currentViewWidth - 40) * row.Width)
                             : row.Width;
@@ -173,6 +241,8 @@ namespace Nodin.Editor
                             try { DrawRow(parent, row); }
                             finally { EditorGUIUtility.labelWidth = oldWidth; }
                         }
+                        if (marginRight > 0)
+                            GUILayout.Space(marginRight);
                     }
                 }
                 return;
@@ -181,6 +251,9 @@ namespace Nodin.Editor
             foreach (var row in rows)
                 DrawRow(parent, row);
         }
+
+        private static float HorizontalDistance(float value, float available) =>
+            value is > 0 and <= 1 ? value * available : value;
 
         private static void DrawTabGroup(NodinPropertyNode parent, Group group, Row[] rows)
         {
@@ -273,6 +346,41 @@ namespace Nodin.Editor
 
         private static void DrawGroup(NodinPropertyNode parent, Group group)
         {
+            var oldDisabled = parent.Tree.EditsDisabled;
+            try
+            {
+                parent.Tree.EditsDisabled |= parent.Tree.Targets.Any(target => !GroupMatches(parent.GroupOwnerOf(target), group));
+                if (group.Options.OfType<ToggleGroupAttribute>().ToArray() is { Length: > 0 } toggles)
+                {
+                    var toggle = parent.Children.FirstOrDefault(child => child.Name == group.Name);
+                    if (toggle?.Value is bool isOn)
+                    {
+                        var key = group.Path + ":toggle-group";
+                        var expanded = parent.Tree.State(key, toggles.Any(option => option.Expanded));
+                        var title = toggles.Select(option => option.GroupTitle).FirstOrDefault(text => text != null) ??
+                                    ObjectNames.NicifyVariableName(group.Name);
+                        parent.Tree.SetState(key, parent.DrawToggleHeader(toggle, new GUIContent(parent.Text(title, parent.GroupOwner)), false, expanded));
+                        if (expanded)
+                        {
+                            parent.Tree.EditsDisabled |= !isOn || toggle.SerializedProperty?.hasMultipleDifferentValues == true;
+                            using var indent = new EditorGUI.IndentLevelScope();
+                            DrawGroupContents(parent, group, toggle.Path);
+                        }
+                        return;
+                    }
+                    EditorGUILayout.HelpBox($"Toggle group '{group.Name}' requires a Boolean member with that name.", MessageType.Error);
+                }
+                DrawFoldoutGroup(parent, group);
+            }
+            catch (Exception exception) when (exception is not ExitGUIException && exception.InnerException is not ExitGUIException)
+            {
+                EditorGUILayout.HelpBox($"{group.Name}: {(exception.InnerException ?? exception).Message}", MessageType.Error);
+            }
+            finally { parent.Tree.EditsDisabled = oldDisabled; }
+        }
+
+        private static void DrawFoldoutGroup(NodinPropertyNode parent, Group group)
+        {
             var foldouts = group.Options.OfType<FoldoutGroupAttribute>().ToArray();
             if (foldouts.Length == 0)
             {
@@ -323,12 +431,17 @@ namespace Nodin.Editor
             finally { EditorGUIUtility.labelWidth = previousLabelWidth; }
         }
 
-        private static void DrawGroupContents(NodinPropertyNode parent, Group group)
+        private static void DrawGroupContents(NodinPropertyNode parent, Group group, string excludePath = null)
         {
             var title = group.Options.OfType<TitleGroupAttribute>().ToArray();
             if (title.Length > 0)
+            {
+                var options = title[0];
+                using var indent = new EditorGUI.IndentLevelScope(options.Indent ? 0 : -EditorGUI.indentLevel);
                 NodinPropertyNode.DrawTitle(parent.Text(group.Name, parent.GroupOwner),
-                    parent.Text(title.Select(item => item.Subtitle).FirstOrDefault(text => text != null), parent.GroupOwner));
+                    parent.Text(title.Select(item => item.Subtitle).FirstOrDefault(text => text != null), parent.GroupOwner),
+                    options.Alignment, options.HorizontalLine, options.BoldTitle);
+            }
 
             var boxes = group.Options.OfType<BoxGroupAttribute>().ToArray();
             using (new EditorGUILayout.VerticalScope(boxes.Length > 0 ? EditorStyles.helpBox : GUIStyle.none))
@@ -340,7 +453,7 @@ namespace Nodin.Editor
                         : EditorStyles.boldLabel;
                     EditorGUILayout.LabelField(parent.Text(group.Name, parent.GroupOwner), style);
                 }
-                DrawRows(parent, group);
+                DrawRows(parent, group, excludePath);
             }
         }
     }

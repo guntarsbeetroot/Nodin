@@ -14,9 +14,12 @@ namespace Nodin.Editor
         internal NodinPropertyTree Tree => _tree;
         internal float Order => GetAttribute<PropertyOrderAttribute>()?.Order ?? (Name == "m_Script" ? float.MinValue : 0);
         private object Resolve(string reference, object owner = null) => NodinExpression.Evaluate(owner ?? Owner, reference);
-        internal object GroupOwner => this == _tree.RootProperty ? _tree.Target : Value ?? Owner;
+        internal object GroupOwner => GroupOwnerOf(_tree.Target);
+        internal object GroupOwnerOf(Object target) => this == _tree.RootProperty ? target : Read(target) ?? OwnerOf(target);
 
         public void Draw() => Draw(null);
+
+        private bool CanInteract => CanWrite || GetAttribute<EnableGUIAttribute>() != null;
 
         internal GUIContent InspectorLabel => Label();
         internal GUIContent TableLabel => Label(honorHideLabel: false);
@@ -26,6 +29,7 @@ namespace Nodin.Editor
             if (this == _tree.RootProperty)
             {
                 var search = _tree.Target.GetType().GetCustomAttribute<SearchableAttribute>(true);
+                DrawTypeInfo(_tree.Target.GetType(), _tree.Target);
                 var children = Children;
                 if (search == null)
                     NodinInspectorLayout.Draw(this, children);
@@ -45,6 +49,9 @@ namespace Nodin.Editor
             var beforeWidth = EditorGUIUtility.labelWidth;
             try
             {
+                using var indent = new EditorGUI.IndentLevelScope(GetAttribute<IndentAttribute>()?.IndentLevel ?? 0);
+                _ = StateFor(_tree.Target);
+                UpdateLifecycle();
                 if (GetAttribute<GUIColorAttribute>() is { } color)
                     GUI.color *= color.Member == null ? color.Color : (Color)Resolve(color.Member);
                 if (GetAttribute<LabelWidthAttribute>() is { } width)
@@ -52,12 +59,23 @@ namespace Nodin.Editor
 
                 var previous = _tree.EditsDisabled;
                 _tree.EditsDisabled = previous || IsDisabled();
-                try { DrawContent(label); }
+                try
+                {
+                    if (GetAttribute<CustomContextMenuAttribute>() == null)
+                        DrawContent(label);
+                    else
+                    {
+                        using var scope = new EditorGUILayout.VerticalScope();
+                        DrawPropertyContext(scope.rect);
+                        DrawContent(label);
+                    }
+                }
                 finally { _tree.EditsDisabled = previous; }
             }
             catch (Exception e) when (e is not ExitGUIException && e.InnerException is not ExitGUIException)
             {
-                EditorGUILayout.HelpBox($"{Name}: {(e.InnerException ?? e).Message}", MessageType.Error);
+                if (GetAttribute<SuppressInvalidAttributeErrorAttribute>() == null)
+                    EditorGUILayout.HelpBox($"{Name}: {(e.InnerException ?? e).Message}", MessageType.Error);
             }
             finally
             {
@@ -68,11 +86,9 @@ namespace Nodin.Editor
 
         internal bool IsVisible()
         {
-            if (GetAttribute<HideInEditorModeAttribute>() != null && !EditorApplication.isPlaying)
-                return false;
             try
             {
-                return _tree.Targets.Any(target => Attributes.All(attribute => attribute switch
+                return _tree.Targets.Any(target => StateFor(target)?.Visible != false && ContextVisible(target) && Attributes.All(attribute => attribute switch
                 {
                     ShowIfAttribute show => Matches(show, target),
                     HideIfAttribute hide => !Matches(hide, target),
@@ -89,18 +105,22 @@ namespace Nodin.Editor
         private bool IsDisabled()
         {
             foreach (var target in _tree.Targets)
+            {
+                if (!ContextVisible(target) || ContextDisabled(target) || StateFor(target)?.Enabled == false)
+                    return true;
                 foreach (var condition in Attributes.OfType<NodinConditionAttribute>())
                 {
                     var match = Matches(condition, target);
                     if (condition is ShowIfAttribute or EnableIfAttribute ? !match : match)
                         return true;
                 }
+            }
 
             return GetAttribute<ReadOnlyAttribute>() != null || Name == "m_Script" ||
+                GetAttribute<ListDrawerSettingsAttribute>()?.IsReadOnly == true || GetAttribute<TableListAttribute>()?.IsReadOnly == true ||
                 _member is MethodInfo { IsStatic: false } && Owner?.GetType().IsValueType == true && _parent?.CanWrite != true ||
                 _tree.IsMulti && !_serialized && _member is not MethodInfo && _injection == null ||
-                GetAttribute<DisableInEditorModeAttribute>() != null && !EditorApplication.isPlaying ||
-                _member is not MethodInfo && _injection == null && !CanWrite &&
+                GetAttribute<EnableGUIAttribute>() == null && _member is not MethodInfo && _injection == null && !CanWrite &&
                 (ValueType == null || ValueType.IsValueType || ValueType == typeof(string));
         }
 
@@ -124,7 +144,7 @@ namespace Nodin.Editor
                 return GUIContent.none;
             return new GUIContent(Text(GetAttribute<LabelTextAttribute>()?.Text) ??
                 SerializedProperty?.displayName ?? ObjectNames.NicifyVariableName(Name),
-                GetAttribute<TooltipAttribute>()?.tooltip ?? SerializedProperty?.tooltip);
+                Text(GetAttribute<PropertyTooltipAttribute>()?.Message) ?? GetAttribute<TooltipAttribute>()?.tooltip ?? SerializedProperty?.tooltip);
         }
 
         private void DrawContent(GUIContent label)
@@ -134,11 +154,14 @@ namespace Nodin.Editor
                 GUILayout.Space(spacing.Before);
 
             if (GetAttribute<TitleAttribute>() is { } title)
-                DrawTitle(Text(title.Text), Text(title.Subtitle));
+                DrawTitle(Text(title.Text), Text(title.Subtitle), title.Alignment, title.HorizontalLine, title.Bold);
 
             foreach (var box in Attributes.OfType<InfoBoxAttribute>())
                 if (string.IsNullOrEmpty(box.VisibleIf) || NodinExpression.Truth(Resolve(box.VisibleIf)))
                     EditorGUILayout.HelpBox(Text(box.Message), (MessageType)box.MessageType);
+
+            DrawDetailedInfo();
+            DrawDiagnostics();
 
             if (_injection != null)
                 _injection(_tree.Target);
@@ -154,18 +177,37 @@ namespace Nodin.Editor
                 GUILayout.Space(spacing.After);
         }
 
-        internal static void DrawTitle(string title, string subtitle)
+        internal static void DrawTitle(string title, string subtitle, TitleAlignments alignment = TitleAlignments.Left,
+            bool horizontalLine = true, bool bold = true)
         {
             GUILayout.Space(3);
-            EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
-            if (!string.IsNullOrEmpty(subtitle))
-                EditorGUILayout.LabelField(subtitle, EditorStyles.wordWrappedMiniLabel);
-            NodinInspectorGUI.HorizontalLineSeparator();
+            var titleStyle = bold ? EditorStyles.boldLabel : EditorStyles.label;
+            var subtitleStyle = EditorStyles.wordWrappedMiniLabel;
+            if (alignment is TitleAlignments.Centered or TitleAlignments.Right)
+            {
+                var anchor = alignment == TitleAlignments.Centered ? TextAnchor.MiddleCenter : TextAnchor.MiddleRight;
+                titleStyle = new GUIStyle(titleStyle) { alignment = anchor };
+                subtitleStyle = new GUIStyle(subtitleStyle) { alignment = anchor };
+            }
+            if (alignment == TitleAlignments.Split && !string.IsNullOrEmpty(subtitle))
+            {
+                using var row = new EditorGUILayout.HorizontalScope();
+                EditorGUILayout.LabelField(title, titleStyle);
+                EditorGUILayout.LabelField(subtitle, new GUIStyle(subtitleStyle) { alignment = TextAnchor.MiddleRight });
+            }
+            else
+            {
+                EditorGUILayout.LabelField(title, titleStyle);
+                if (!string.IsNullOrEmpty(subtitle))
+                    EditorGUILayout.LabelField(subtitle, subtitleStyle);
+            }
+            if (horizontalLine)
+                NodinInspectorGUI.HorizontalLineSeparator();
         }
 
         private void DrawMethod(MethodInfo method, GUIContent content)
         {
-            var hasButton = GetAttribute<ButtonAttribute>() is { } || GetAttribute<ButtonGroupAttribute>() != null;
+            var hasButton = GetAttribute<ButtonAttribute>() is { } || GetAttribute<ButtonGroupAttribute>() != null || GetAttribute<ResponsiveButtonGroupAttribute>() != null;
             if (!hasButton && GetAttribute<OnInspectorGUIAttribute>() != null)
             {
                 if (method.GetParameters().Length == 0)
@@ -223,11 +265,9 @@ namespace Nodin.Editor
 
         private void DrawValueAndActions(GUIContent label)
         {
-            if (GetAttribute<OnInspectorGUIAttribute>() is { Action: not null } hook)
-            {
-                using var disabled = new EditorGUI.DisabledScope(_tree.EditsDisabled);
-                NodinExpression.Call(Owner, hook.Action);
-            }
+            var hook = GetAttribute<OnInspectorGUIAttribute>();
+            if (hook?.Append != true)
+                DrawGuiHook(hook?.Action);
 
             var callbacks = Attributes.OfType<OnValueChangedAttribute>().ToArray();
             var before = callbacks.Length == 0 ? null : SnapshotValues();
@@ -251,7 +291,8 @@ namespace Nodin.Editor
                     }
                     if (check.changed)
                     {
-                        ClampMinimum();
+                        ApplyNumericConstraints();
+                        NotifySerializedCollectionElement();
                         if (before != null)
                             NotifyChanged(before);
                     }
@@ -271,12 +312,23 @@ namespace Nodin.Editor
                     EditorGUILayout.EndHorizontal();
             }
 
+            DrawGuiHook(hook?.Append == true ? hook.Action : hook?.AfterAction);
+
             if (GetAttribute<RequiredAttribute>() is { } required && IsMissing(Value))
                 EditorGUILayout.HelpBox(Text(required.Message) ?? $"{label.text ?? Name} is required.", MessageType.Error);
 
-            if (GetAttribute<ValidateInputAttribute>() is { } validate &&
-                !NodinExpression.Truth(NodinExpression.Call(Owner, validate.Member, Value)))
-                EditorGUILayout.HelpBox(Text(validate.Message) ?? $"{label.text ?? Name} is invalid.", MessageType.Error);
+            if (GetAttribute<ValidateInputAttribute>() is { } validate)
+                DrawInputValidation(validate, label);
+
+            DrawAttributeValidation(label);
+        }
+
+        private void DrawGuiHook(string action)
+        {
+            if (string.IsNullOrWhiteSpace(action))
+                return;
+            using var disabled = new EditorGUI.DisabledScope(_tree.EditsDisabled);
+            NodinPropertyTree.RunAttributeAction(Owner, action);
         }
 
         private static bool IsMissing(object value) => NodinExpression.IsNull(value) ||
@@ -320,15 +372,6 @@ namespace Nodin.Editor
             });
         }
 
-        private void ClampMinimum()
-        {
-            if (GetAttribute<MinValueAttribute>() is not { } minimum || Value is not IConvertible value ||
-                ValueType == null || ValueType.IsEnum)
-                return;
-            if (value.ToDouble(System.Globalization.CultureInfo.InvariantCulture) < minimum.Minimum)
-                Value = NodinExpression.ConvertValue(minimum.Minimum, ValueType);
-        }
-
         private void DrawValue(GUIContent label)
         {
             var property = SerializedProperty;
@@ -336,6 +379,27 @@ namespace Nodin.Editor
             EditorGUI.showMixedValue = property?.hasMultipleDifferentValues ?? false;
             try
             {
+                if (property != null && GetAttribute<SuppressInvalidAttributeErrorAttribute>() != null &&
+                    property.propertyType is not (SerializedPropertyType.Float or SerializedPropertyType.Integer) &&
+                    GetAttribute<RangeAttribute>() != null)
+                {
+                    DrawCustom(property, label, content =>
+                    {
+                        using var scope = new EditorGUI.DisabledScope(_tree.EditsDisabled);
+                        using var change = new EditorGUI.ChangeCheckScope();
+                        var edited = NodinValueControls.Reflection(content, ValueType, Value, !EditorUtility.IsPersistent(_tree.Target));
+                        if (change.changed)
+                            Value = edited;
+                        return true;
+                    });
+                    return;
+                }
+                if (property != null && GetAttribute<DrawWithUnityAttribute>() != null)
+                {
+                    using var disabled = new EditorGUI.DisabledScope(_tree.EditsDisabled);
+                    EditorGUILayout.PropertyField(property, label, true);
+                    return;
+                }
                 if (NodinInspectorExtensions.HasDrawer(this))
                 {
                     using var disabled = new EditorGUI.DisabledScope(_tree.EditsDisabled);
@@ -362,6 +426,10 @@ namespace Nodin.Editor
                     NodinValueControls.Display(label, Value, display.Overflow);
                     return;
                 }
+
+                using (new EditorGUI.DisabledScope(_tree.EditsDisabled || !CanInteract))
+                    if (DrawNumericControl(property, label))
+                        return;
 
                 if (property == null)
                 {
@@ -393,11 +461,15 @@ namespace Nodin.Editor
 
         private void DrawSerialized(SerializedProperty property, GUIContent label)
         {
+            if (DrawReferenceControl(property, label))
+                return;
+
             if (property.isArray && !property.isFixedBuffer && property.propertyType != SerializedPropertyType.String &&
                 (GetAttribute<ListDrawerSettingsAttribute>() != null || GetAttribute<TableListAttribute>() != null ||
                  GetAttribute<SearchableAttribute>() != null || GetAttribute<ValueDropdownAttribute>() != null ||
                  GetAttribute<PreviewFieldAttribute>() != null || GetAttribute<InlineEditorAttribute>() != null ||
                  GetAttribute<AssetsOnlyAttribute>() != null || GetAttribute<SceneObjectsOnlyAttribute>() != null ||
+                 HasReferenceCollectionOptions() || HasCollectionCallbacks ||
                  _tree.EditsDisabled || _tree.HasNestedCustomization(ValueType) ||
                  !_tree.IsMulti && !Attributes.OfType<PropertyAttribute>()
                      .Any(attribute => attribute is not TooltipAttribute and not NonReorderableAttribute)))
@@ -415,7 +487,8 @@ namespace Nodin.Editor
 
             if (property.propertyType == SerializedPropertyType.ObjectReference &&
                 (GetAttribute<PreviewFieldAttribute>() != null || GetAttribute<InlineEditorAttribute>() != null ||
-                 GetAttribute<AssetsOnlyAttribute>() != null || GetAttribute<SceneObjectsOnlyAttribute>() != null))
+                 GetAttribute<AssetsOnlyAttribute>() != null || GetAttribute<SceneObjectsOnlyAttribute>() != null ||
+                 HasReferenceObjectOptions()))
             {
                 DrawObject(property, label);
                 return;
@@ -467,10 +540,17 @@ namespace Nodin.Editor
 
         private void DrawReflected(GUIContent label)
         {
+            if (DrawReferenceControl(null, label))
+                return;
             var value = Value;
             if (value != null && IsAncestorValue(value))
             {
-                NodinValueControls.Display(label, value, false);
+                DrawDuplicateReference(label, "parent");
+                return;
+            }
+            if (value is Array { Rank: 2 } matrix && GetAttribute<TableMatrixAttribute>() is { } matrixOptions)
+            {
+                NodinCollections.DrawMatrix(this, matrix, label, matrixOptions);
                 return;
             }
             if (value is IDictionary dictionary)
@@ -482,13 +562,30 @@ namespace Nodin.Editor
                 return;
 
             var valueType = value?.GetType() ?? ValueType;
-            if (value is string text && GetAttribute<MultiLinePropertyAttribute>() is { } multiline)
+            if (valueType == typeof(string) && GetAttribute<NodinPathAttribute>() is { } path)
             {
-                using var textDisabled = new EditorGUI.DisabledScope(_tree.EditsDisabled || !CanWrite);
+                using var disabledPath = new EditorGUI.DisabledScope(_tree.EditsDisabled || !CanInteract);
+                using var row = new EditorGUILayout.HorizontalScope();
+                using var check = new EditorGUI.ChangeCheckScope();
+                var text = EditorGUILayout.TextField(label, value as string ?? "");
+                var changedPath = check.changed;
+                if (GUILayout.Button(new GUIContent("…", "Browse"), GUILayout.Width(29)) &&
+                    NodinValueControls.ChoosePath(this, text, path) is { } selected)
+                {
+                    text = selected;
+                    changedPath = true;
+                }
+                if (changedPath)
+                    Value = text;
+                return;
+            }
+            if (valueType == typeof(string) && GetAttribute<MultiLinePropertyAttribute>() is { } multiline)
+            {
+                using var textDisabled = new EditorGUI.DisabledScope(_tree.EditsDisabled || !CanInteract);
                 if (label != GUIContent.none)
                     EditorGUILayout.LabelField(label);
                 using var check = new EditorGUI.ChangeCheckScope();
-                var nextText = EditorGUILayout.TextArea(text,
+                var nextText = EditorGUILayout.TextArea(value as string ?? "",
                     GUILayout.MinHeight(multiline.Lines * EditorGUIUtility.singleLineHeight));
                 if (check.changed)
                     Value = nextText;
@@ -502,22 +599,33 @@ namespace Nodin.Editor
             }
 
             using var changed = new EditorGUI.ChangeCheckScope();
-            using var disabled = new EditorGUI.DisabledScope(!CanWrite || _tree.EditsDisabled);
+            using var disabled = new EditorGUI.DisabledScope(!CanInteract || _tree.EditsDisabled);
             var next = NodinValueControls.Reflection(label, valueType, value,
                 GetAttribute<AssetsOnlyAttribute>() == null);
-            if (changed.changed && CanWrite && (GetAttribute<SceneObjectsOnlyAttribute>() == null ||
-                next is not Object obj || !EditorUtility.IsPersistent(obj)))
+            if (changed.changed && CanWrite && (next is not Object obj || IsAllowedReference(obj) &&
+                (GetAttribute<SceneObjectsOnlyAttribute>() == null || !EditorUtility.IsPersistent(obj))))
                 Value = next;
         }
 
         private void DrawNested(SerializedProperty property, GUIContent label)
         {
-            var inline = GetAttribute<InlinePropertyAttribute>() != null;
+            var value = Value;
+            if (IsDuplicateReference(value, out var previousReference) &&
+                (previousReference == "parent" || GetAttribute<HideDuplicateReferenceBoxAttribute>() == null))
+            {
+                DrawDuplicateReference(label, previousReference);
+                return;
+            }
+            DrawTypeInfo(value?.GetType() ?? ValueType, value ?? Owner);
+            var inlineOptions = GetAttribute<InlinePropertyAttribute>();
+            var inline = inlineOptions != null;
+            if (inlineOptions?.LabelWidth > 0)
+                EditorGUIUtility.labelWidth = inlineOptions.LabelWidth;
             var toggle = GetAttribute<ToggleAttribute>();
             var toggleChild = toggle != null ? Children.FirstOrDefault(child => child.Name == toggle.Member) : null;
             var hasToggle = toggleChild?.Value is bool;
             var key = Path + ":nested";
-            var expanded = inline || (property?.isExpanded ?? _tree.State(key, false));
+            var expanded = inline || (ExpandedByState ?? property?.isExpanded ?? _tree.State(key, false));
             var next = expanded;
             if (!inline && label == GUIContent.none)
                 label = new GUIContent(ObjectNames.NicifyVariableName(Name));
@@ -563,7 +671,7 @@ namespace Nodin.Editor
         private static readonly GUIContent ExpandedToggleArrow = new GUIContent("▼");
         private static readonly GUIContent CollapsedToggleArrow = new GUIContent("◀");
 
-        private bool DrawToggleHeader(NodinPropertyNode toggle, GUIContent label, bool inline, bool expanded)
+        internal bool DrawToggleHeader(NodinPropertyNode toggle, GUIContent label, bool inline, bool expanded)
         {
             var lineHeight = EditorGUIUtility.singleLineHeight;
             var row = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect(false, lineHeight + 1));
@@ -613,7 +721,7 @@ namespace Nodin.Editor
             return next;
         }
 
-        private void DrawToggle(Rect rect, NodinPropertyNode toggle, bool enabled)
+        internal void DrawToggle(Rect rect, NodinPropertyNode toggle, bool enabled)
         {
             using var disabled = new EditorGUI.DisabledScope(_tree.EditsDisabled || toggle.IsDisabled());
             var previous = EditorGUI.showMixedValue;
@@ -650,6 +758,7 @@ namespace Nodin.Editor
             var allowScene = GetAttribute<AssetsOnlyAttribute>() == null && !EditorUtility.IsPersistent(_tree.Target);
             var onlyScene = GetAttribute<SceneObjectsOnlyAttribute>() != null;
             var value = property.objectReferenceValue;
+            DrawReferenceObjectPicker(property, label);
             if (inline?.ObjectFieldMode is not InlineEditorObjectFieldModes.CompletelyHidden &&
                 (inline?.ObjectFieldMode != InlineEditorObjectFieldModes.Hidden || !value))
             {
@@ -663,8 +772,8 @@ namespace Nodin.Editor
                     // PreviewRect has already applied the inspector indent.
                     using var indent = new EditorGUI.IndentLevelScope(preview == null ? 0 : -EditorGUI.indentLevel);
                     var next = EditorGUI.ObjectField(fieldRect, preview == null ? content : GUIContent.none,
-                        value, ValueType ?? typeof(Object), allowScene);
-                    if (change.changed && (!onlyScene || next == null || !EditorUtility.IsPersistent(next)))
+                        value, ReferenceObjectType ?? typeof(Object), allowScene);
+                    if (change.changed && IsAllowedReference(next) && (!onlyScene || next == null || !EditorUtility.IsPersistent(next)))
                         property.objectReferenceValue = next;
                 }
                 finally { EditorGUI.EndProperty(); }

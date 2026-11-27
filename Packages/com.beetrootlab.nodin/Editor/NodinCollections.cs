@@ -10,7 +10,7 @@ using Object = UnityEngine.Object;
 
 namespace Nodin.Editor
 {
-    internal static class NodinCollections
+    internal static partial class NodinCollections
     {
         private const string DragKey = "Nodin.CollectionRow";
         private const float TableHandleWidth = 13;
@@ -33,8 +33,9 @@ namespace Nodin.Editor
             var dropdown = node.GetAttribute<ValueDropdownAttribute>();
             var pageSize = Math.Max(1, table?.NumberOfItemsPerPage ?? list?.NumberOfItemsPerPage ?? 15);
             var paging = table?.ShowPaging ?? list?.ShowPaging ?? true;
-            var expanded = table?.AlwaysExpanded == true || node.Tree.State(node.Path + ":list",
-                list?.InitialExpansion ?? property.isExpanded);
+            var fixedExpansion = table?.AlwaysExpanded == true || list?.ShowFoldout == false;
+            var expanded = fixedExpansion || (node.ExpandedByState ?? node.Tree.State(node.Path + ":list",
+                list?.InitialExpansion ?? property.isExpanded));
             var compatible = CanMultiEditArray(node, property);
             var count = property.arraySize;
             var query = search == null ? "" : node.Tree.State(node.Path + ":query", "").Trim();
@@ -53,7 +54,7 @@ namespace Nodin.Editor
                 try
                 {
                     var heading = label == GUIContent.none ? "" : content.text;
-                    if (table?.AlwaysExpanded == true)
+                    if (fixedExpansion)
                     {
                         if (heading.Length != 0)
                             GUILayout.Label(content, EditorStyles.label, GUILayout.ExpandWidth(false));
@@ -86,7 +87,9 @@ namespace Nodin.Editor
 
                     if (search != null)
                         Query(node, GUILayout.MinWidth(36), GUILayout.MaxWidth(175));
-                    GUILayout.Label(count == 0 ? "Empty" : $"{count} items", EditorStyles.miniLabel, GUILayout.ExpandWidth(false));
+                    if (list?.ShowItemCount != false)
+                        GUILayout.Label(count == 0 ? "Empty" : $"{count} items", EditorStyles.miniLabel, GUILayout.ExpandWidth(false));
+                    DrawListHook(node, list?.OnTitleBarGUI);
                     if (pageTotal > 1)
                     {
                         using (new EditorGUI.DisabledScope(page == 0))
@@ -102,16 +105,18 @@ namespace Nodin.Editor
                     }
 
                     using (new EditorGUI.DisabledScope(!compatible || node.Tree.EditsDisabled ||
-                        node.Tree.IsMulti && count >= property.serializedObject.maxArraySizeForMultiEditing))
+                        node.Tree.IsMulti && (count >= property.serializedObject.maxArraySizeForMultiEditing ||
+                                             list?.CustomAddFunction != null)))
                     {
-                        if (list?.HideAddButton != true &&
+                        if (list?.HideAddButton != true && !node.HasAssetCollectionPicker() &&
                             GUILayout.Button(new GUIContent("+", "Add item"), EditorStyles.toolbarButton, GUILayout.Width(22)))
                         {
                             if (dropdown != null)
                                 ShowDropdown(node, property, dropdown, null);
                             else
                             {
-                                EditArray(node, property, array => AppendElement(array, NodinMemberPath.ElementType(node.ValueType)));
+                                EditArray(node, property, new CollectionChangeInfo(CollectionChangeType.Add, count),
+                                    array => AppendConfiguredElement(node, array, list?.CustomAddFunction));
                                 GUIUtility.ExitGUI();
                             }
                         }
@@ -137,10 +142,13 @@ namespace Nodin.Editor
             }
 
             var reorder = list?.DraggableItems != false && node.GetAttribute<NonReorderableAttribute>() == null && count > 1;
-            var removable = list?.HideRemoveButton != true;
+            var removable = list?.HideRemoveButton != true && !(node.Tree.IsMulti && list?.CustomRemoveIndexFunction != null);
             var filtered = query.Length > 0;
             var attributes = node.Attributes.Where(attribute => attribute is PreviewFieldAttribute or AssetsOnlyAttribute
-                or SceneObjectsOnlyAttribute or InlineEditorAttribute).ToArray();
+                or SceneObjectsOnlyAttribute or InlineEditorAttribute or ChildGameObjectsOnlyAttribute
+                or ColorPaletteAttribute or HideReferenceObjectPickerAttribute or PolymorphicDrawerSettingsAttribute
+                or TypeDrawerSettingsAttribute or TypeFilterAttribute or TypeSelectorSettingsAttribute
+                or ToggleAttribute or InlinePropertyAttribute).ToArray();
             var rows = indices.Select(index => new CollectionRow
             {
                 Index = index,
@@ -149,15 +157,16 @@ namespace Nodin.Editor
 
             if (table != null && rows.Any(row => row.Node.Children.Count > 0))
             {
-                DrawTable(node, property, rows, reorder, removable, filtered, paging);
+                DrawTable(node, property, rows, reorder, removable, filtered, paging, table, list);
                 return;
             }
 
             foreach (var row in rows)
             {
                 var element = row.Node.SerializedProperty;
-                var hasFoldout = dropdown == null &&
-                    element is { propertyType: SerializedPropertyType.Generic or SerializedPropertyType.ManagedReference } &&
+                var useDropdown = dropdown?.DrawDropdownForListElements == true;
+                var hasFoldout = !useDropdown &&
+                    element is { propertyType: SerializedPropertyType.Generic } &&
                     (element.hasVisibleChildren || row.Node.Children.Count > 0);
                 using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox, GUILayout.MinHeight(23)))
                 {
@@ -166,7 +175,8 @@ namespace Nodin.Editor
                     var elementLabel = ElementLabel(row.Node, list, row.Index);
                     using (var body = new EditorGUILayout.VerticalScope())
                     {
-                        if (dropdown != null)
+                        DrawListHook(node, list?.OnBeginListElementGUI, row.Index);
+                        if (useDropdown)
                         {
                             using var disabled = new EditorGUI.DisabledScope(node.Tree.EditsDisabled);
                             DrawDropdown(node, property, elementLabel, dropdown, row.Index);
@@ -175,11 +185,56 @@ namespace Nodin.Editor
                             DrawFoldoutRow(node, property, row, elementLabel, body.rect, reorder, filtered);
                         else
                             row.Node.Draw(elementLabel);
+                        DrawListHook(node, list?.OnEndListElementGUI, row.Index);
                     }
                     if (removable)
-                        RemoveButton(node, property, row.Index);
+                        RemoveButton(node, property, row.Index, list?.CustomRemoveIndexFunction);
                 }
             }
+        }
+
+        private static void AppendConfiguredElement(NodinPropertyNode node, SerializedProperty array, string factory)
+        {
+            var elementType = NodinMemberPath.ElementType(node.ValueType);
+            if (string.IsNullOrWhiteSpace(factory))
+            {
+                AppendElement(array, elementType);
+                return;
+            }
+            var value = NodinExpression.ConvertValue(NodinExpression.Evaluate(node.Owner, factory), elementType);
+            var index = array.arraySize++;
+            try
+            {
+                var element = array.GetArrayElementAtIndex(index);
+                if (element.propertyType == SerializedPropertyType.ManagedReference)
+                    element.managedReferenceValue = value;
+                else
+                    element.boxedValue = value;
+            }
+            catch
+            {
+                array.arraySize = index;
+                throw;
+            }
+        }
+
+        private static void DrawListHook(NodinPropertyNode node, string action, int? index = null)
+        {
+            if (string.IsNullOrWhiteSpace(action))
+                return;
+            if (index.HasValue && !action.StartsWith("@", StringComparison.Ordinal))
+            {
+                try
+                {
+                    NodinExpression.Call(node.Owner, action.TrimStart('$'), index.Value);
+                    return;
+                }
+                catch (MissingMethodException)
+                {
+                    // Also allow callbacks that do not take an index.
+                }
+            }
+            NodinPropertyTree.RunAttributeAction(node.Owner, action);
         }
 
         private static void DrawFoldoutRow(NodinPropertyNode node, SerializedProperty property, CollectionRow row,
@@ -217,10 +272,10 @@ namespace Nodin.Editor
         }
 
         private static void DrawTable(NodinPropertyNode collection, SerializedProperty property, CollectionRow[] rows,
-            bool reorder, bool removable, bool filtered, bool paging)
+            bool reorder, bool removable, bool filtered, bool paging, TableListAttribute table, ListDrawerSettingsAttribute list)
         {
             var columns = rows.SelectMany(row => row.Node.Children)
-                .Where(child => child.IsVisible()).GroupBy(ColumnKey).Select(group => group.First())
+                .Where(child => child.IsVisible() && child.GetAttribute<HideInTablesAttribute>() == null).GroupBy(ColumnKey).Select(group => group.First())
                 .OrderBy(child => child.Order).ToArray();
             var labels = columns.Select(column => column.TableLabel).ToArray();
             var controlsWidth = (reorder ? TableHandleWidth + TableColumnGap : 0) +
@@ -231,14 +286,25 @@ namespace Nodin.Editor
             var available = collection.Tree.State(widthKey, EditorGUIUtility.currentViewWidth - 24 - EditorGUI.indentLevel * 15);
             if (Event.current.type == EventType.Repaint && measured.width > 1)
                 collection.Tree.SetState(widthKey, measured.width);
-            var widths = TableWidths(columns.Select(column => column.GetAttribute<TableColumnWidthAttribute>()?.Width).ToArray(),
+            var columnWidths = collection.Tree.State(widthKey + ":columns", new Dictionary<int, float>());
+            var columnOptions = columns.Select(column => column.GetAttribute<TableColumnWidthAttribute>()).ToArray();
+            var widths = TableWidths(columnOptions.Select(option => option?.Width).ToArray(),
                 available - controlsWidth,
                 columns.Select((column, i) => TableContentWidth(column, labels[i])).ToArray());
+            for (var i = 0; i < widths.Length; i++)
+                if (columnWidths.TryGetValue(i, out var width))
+                    widths[i] = width;
             // A page should grow with its actual rows. The Inspector owns vertical scrolling.
-            var fitRows = GUILayout.ExpandHeight(false);
-            using var scroll = new EditorGUILayout.ScrollViewScope(collection.Tree.State(scrollKey, Vector2.zero),
-                paging ? new[] { fitRows } : new[] { fitRows, GUILayout.MaxHeight(540) });
-            collection.Tree.SetState(scrollKey, scroll.scrollPosition);
+            var scrollOptions = new List<GUILayoutOption> { GUILayout.ExpandHeight(false) };
+            if (table.MinScrollViewHeight > 0)
+                scrollOptions.Add(GUILayout.MinHeight(table.MinScrollViewHeight));
+            if (table.MaxScrollViewHeight > 0 && (!paging || table.MaxScrollViewHeight != 540))
+                scrollOptions.Add(GUILayout.MaxHeight(Math.Max(table.MinScrollViewHeight, table.MaxScrollViewHeight)));
+            using var scroll = table.DrawScrollView
+                ? new EditorGUILayout.ScrollViewScope(collection.Tree.State(scrollKey, Vector2.zero), scrollOptions.ToArray())
+                : null;
+            if (scroll != null)
+                collection.Tree.SetState(scrollKey, scroll.scrollPosition);
             using (var header = new EditorGUILayout.HorizontalScope())
             {
                 if (Event.current.type == EventType.Repaint)
@@ -250,7 +316,10 @@ namespace Nodin.Editor
                     if (i > 0)
                         GUILayout.Space(TableColumnGap);
                     using var cell = new EditorGUILayout.VerticalScope(TableCellStyle, GUILayout.Width(widths[i]));
-                    GUILayout.Label(labels[i], EditorStyles.miniBoldLabel);
+                    var labelRect = GUILayoutUtility.GetRect(widths[i], EditorGUIUtility.singleLineHeight, GUILayout.Width(widths[i]));
+                    GUI.Label(labelRect, labels[i], EditorStyles.miniBoldLabel);
+                    if (columnOptions[i]?.Resizable != false)
+                        ResizeColumn(widthKey, i, labelRect, columnWidths, widths[i]);
                 }
                 if (removable)
                     GUILayout.Space(TableRemoveWidth + TableColumnGap);
@@ -258,6 +327,7 @@ namespace Nodin.Editor
 
             foreach (var row in rows)
             {
+                DrawListHook(collection, list?.OnBeginListElementGUI, row.Index);
                 var cells = row.Node.Children.ToDictionary(ColumnKey);
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -271,7 +341,7 @@ namespace Nodin.Editor
                         if (i > 0)
                             GUILayout.Space(TableColumnGap);
                         using var cell = new EditorGUILayout.VerticalScope(TableCellStyle, GUILayout.Width(widths[i]));
-                        if (cells.TryGetValue(ColumnKey(columns[i]), out var value))
+                        if (cells.TryGetValue(ColumnKey(columns[i]), out var value) && value.GetAttribute<HideInTablesAttribute>() == null)
                         {
                             using var indent = new EditorGUI.IndentLevelScope(-EditorGUI.indentLevel);
                             value.Draw(GUIContent.none);
@@ -281,9 +351,10 @@ namespace Nodin.Editor
                     {
                         GUILayout.Space(TableColumnGap);
                         using var actions = new EditorGUILayout.VerticalScope(TableCellStyle, GUILayout.Width(TableRemoveWidth));
-                        RemoveButton(collection, property, row.Index, TableRemoveWidth);
+                        RemoveButton(collection, property, row.Index, list?.CustomRemoveIndexFunction, TableRemoveWidth);
                     }
                 }
+                DrawListHook(collection, list?.OnEndListElementGUI, row.Index);
             }
         }
 
@@ -311,12 +382,20 @@ namespace Nodin.Editor
             return widths.Select(width => width == 0 ? flexibleWidth : width).ToArray();
         }
 
-        private static void RemoveButton(NodinPropertyNode node, SerializedProperty property, int index, float width = 25)
+        private static void RemoveButton(NodinPropertyNode node, SerializedProperty property, int index,
+            string customRemove, float width = 25)
         {
             using var disabled = new EditorGUI.DisabledScope(node.Tree.EditsDisabled);
             if (!GUILayout.Button(new GUIContent("−", $"Remove item {index + 1}"), GUILayout.Width(width)))
                 return;
-            EditArray(node, property, array =>
+            if (customRemove != null)
+            {
+                var change = new CollectionChangeInfo(CollectionChangeType.Remove, index);
+                node.EditReflectedCollection(change, _ => NodinExpression.Call(node.Owner, customRemove, index));
+                GUIUtility.ExitGUI();
+                return;
+            }
+            EditArray(node, property, new CollectionChangeInfo(CollectionChangeType.Remove, index), array =>
             {
                 var size = array.arraySize;
                 array.DeleteArrayElementAtIndex(index);
@@ -353,7 +432,8 @@ namespace Nodin.Editor
                 if (input.type == EventType.DragPerform)
                 {
                     DragAndDrop.AcceptDrag();
-                    EditArray(node, property, array => array.MoveArrayElement(drag.Index, index));
+                    EditArray(node, property, new CollectionChangeInfo(CollectionChangeType.Move, drag.Index, index),
+                        array => array.MoveArrayElement(drag.Index, index));
                     input.Use();
                     GUIUtility.ExitGUI();
                 }
@@ -363,6 +443,8 @@ namespace Nodin.Editor
 
         private static void ShowMoveMenu(NodinPropertyNode node, SerializedProperty property, int index)
         {
+            if (!node.CanDrawCollectionContext)
+                return;
             var menu = new GenericMenu();
             AddMove(menu, "Move up", index > 0, node, property, index, index - 1);
             AddMove(menu, "Move down", index + 1 < property.arraySize, node, property, index, index + 1);
@@ -384,11 +466,12 @@ namespace Nodin.Editor
             menu.AddItem(new GUIContent(label), false, () =>
             {
                 if (unchanged())
-                    EditArray(node, node.Tree.Serialization.FindProperty(path), array => array.MoveArrayElement(from, to));
+                    EditArray(node, node.Tree.Serialization.FindProperty(path), new CollectionChangeInfo(CollectionChangeType.Move, from, to),
+                        array => array.MoveArrayElement(from, to));
             });
         }
 
-        private static Func<bool> DeferredEditGuard(NodinPropertyNode node, string path)
+        internal static Func<bool> DeferredEditGuard(NodinPropertyNode node, string path)
         {
             var targets = node.Tree.Targets;
             var hashes = targets.Select(target => ContentHash(target, path)).ToArray();
@@ -482,19 +565,25 @@ namespace Nodin.Editor
             }
         }
 
-        private static void EditArray(NodinPropertyNode node, SerializedProperty property, Action<SerializedProperty> edit)
+        internal static void EditArray(NodinPropertyNode node, SerializedProperty property, CollectionChangeInfo change,
+            Action<SerializedProperty> edit)
         {
-            if (!node.Tree.ShouldApply || property == null)
+            if (!node.Tree.ShouldApply || node.Tree.EditsDisabled || property == null)
                 return;
-            var current = node.Tree.Serialization.FindProperty(property.propertyPath);
+            var path = property.propertyPath;
+            if (node.HasCollectionCallbacks)
+                node.Tree.ApplyModifiedProperties();
+            var before = node.SnapshotValues();
+            node.SerializedCollectionCallback(change, true);
+            var current = node.Tree.Serialization.FindProperty(path);
             if (current == null)
                 return;
-            var before = node.SnapshotValues();
             edit(current);
             if (before == null)
                 node.Tree.ApplyModifiedProperties();
             else
                 node.NotifyChanged(before);
+            node.SerializedCollectionCallback(change, false);
             if (Event.current != null)
                 GUI.changed = true;
         }
@@ -544,14 +633,26 @@ namespace Nodin.Editor
             var menu = new GenericMenu();
             var path = property.propertyPath;
             var unchanged = DeferredEditGuard(node, path);
+            if (node.Text(attribute.DropdownTitle) is { Length: > 0 } title)
+            {
+                menu.AddDisabledItem(new GUIContent(title.Replace("/", "／")));
+                menu.AddSeparator("");
+            }
+            var hasValues = false;
             foreach (var choice in Choices(node, attribute))
             {
-                var content = new GUIContent(choice.label.Replace("/", "／"));
-                if (!replaceScalar && attribute.IsUniqueList && HasChoice(node, property, choice.value, index))
+                var content = new GUIContent(attribute.ExpandAllMenuItems ? choice.label.Replace("/", " › ") : choice.label);
+                var unique = attribute.IsUniqueList || attribute.ExcludeExistingValuesInList;
+                if (!replaceScalar && unique && HasChoice(node, property, choice.value, index))
                 {
-                    menu.AddDisabledItem(content);
+                    if (!attribute.ExcludeExistingValuesInList)
+                    {
+                        menu.AddDisabledItem(content);
+                        hasValues = true;
+                    }
                     continue;
                 }
+                hasValues = true;
                 menu.AddItem(content, false, () =>
                 {
                     if (!unchanged() || !Choices(node, attribute).Any(current => NodinExpression.Equal(current.value, choice.value)))
@@ -572,9 +673,11 @@ namespace Nodin.Editor
                     else
                     {
                         var arrayProperty = node.Tree.Serialization.FindProperty(path);
-                        if (arrayProperty == null || attribute.IsUniqueList && HasChoice(node, arrayProperty, choice.value, index))
+                        if (arrayProperty == null || unique && HasChoice(node, arrayProperty, choice.value, index))
                             return;
-                        EditArray(node, arrayProperty, array =>
+                        var change = new CollectionChangeInfo(index.HasValue ? CollectionChangeType.Replace : CollectionChangeType.Add,
+                            index ?? arrayProperty.arraySize);
+                        EditArray(node, arrayProperty, change, array =>
                         {
                             if (index.HasValue && index.Value >= array.arraySize)
                                 return;
@@ -586,7 +689,7 @@ namespace Nodin.Editor
                     }
                 });
             }
-            if (menu.GetItemCount() == 0)
+            if (!hasValues)
                 menu.AddDisabledItem(new GUIContent("No values available"));
             menu.ShowAsContext();
         }
@@ -675,44 +778,36 @@ namespace Nodin.Editor
             return false;
         }
 
-        internal static void DrawDictionary(NodinPropertyNode node, IDictionary dictionary, GUIContent label)
-        {
-            var key = node.Path + ":dictionary";
-            var expanded = node.Tree.State(key, false);
-            node.Tree.SetState(key, EditorGUILayout.Foldout(expanded, $"{label.text} ({dictionary.Count})", true));
-            if (!expanded)
-                return;
-            using var indent = new EditorGUI.IndentLevelScope();
-            var index = 0;
-            var entries = new List<DictionaryEntry>(dictionary.Count);
-            foreach (DictionaryEntry item in dictionary)
-                entries.Add(item);
-            foreach (var item in entries)
-            {
-                var entryKey = item.Key;
-                var type = item.Value?.GetType() ?? dictionary.GetType().GetGenericArguments().LastOrDefault();
-                var child = node.CollectionElement(index++, type,
-                    owner => ((IDictionary)owner)[entryKey],
-                    dictionary.IsReadOnly ? null : (owner, edited) => ((IDictionary)owner)[entryKey] = edited);
-                child.Draw(new GUIContent(entryKey?.ToString() ?? "None"));
-            }
-        }
-
         private static bool IsReadOnlySet(object set, Type elementType) =>
             typeof(ICollection<>).MakeGenericType(elementType).GetProperty("IsReadOnly")?.GetValue(set) is true;
 
         internal static bool DrawSetOrList(NodinPropertyNode node, object value, GUIContent label)
         {
-            if (value is not IEnumerable entries || value is string ||
-                value is not IList && !value.GetType().GetInterfaces().Any(type => type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ISet<>)))
+            if (value is not IEnumerable entries || value is string)
                 return false;
+            var type = value.GetType();
+            var list = value as IList;
+            var set = type.GetInterfaces().FirstOrDefault(candidate =>
+                candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(ISet<>));
+            var sequence = SequenceType(type);
+            var elementType = list != null ? NodinMemberPath.ElementType(type) ?? typeof(object) :
+                (set ?? sequence)?.GetGenericArguments()[0];
+            if (elementType == null)
+                return false;
+
             var items = entries.Cast<object>().ToArray();
             var key = node.Path + ":runtime-list";
             var options = node.GetAttribute<ListDrawerSettingsAttribute>();
-            var expanded = node.Tree.State(key, options?.InitialExpansion ?? false);
-            node.Tree.SetState(key, EditorGUILayout.Foldout(expanded, $"{label.text} ({items.Length})", true));
+            var expanded = options?.ShowFoldout == false || (node.ExpandedByState ??
+                node.Tree.State(key, options?.InitialExpansion ?? false));
+            var heading = options?.ShowItemCount == false ? label.text : $"{label.text} ({items.Length})";
+            if (options?.ShowFoldout == false)
+                EditorGUILayout.LabelField(heading);
+            else
+                node.Tree.SetState(key, EditorGUILayout.Foldout(expanded, heading, true));
             if (!expanded)
                 return true;
+
             var searchable = node.GetAttribute<SearchableAttribute>();
             var query = searchable == null ? "" : Query(node);
             using var indent = new EditorGUI.IndentLevelScope();
@@ -724,14 +819,12 @@ namespace Nodin.Editor
                 labelText ??= $"Element {i}";
                 if (query.Length > 0 && !Match(labelText + " " + item, query, searchable.FuzzySearch))
                     continue;
+
                 var index = i;
-                var list = value as IList;
-                var elementType = NodinMemberPath.ElementType(value.GetType()) ??
-                    value.GetType().GetInterfaces().First(type => type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ISet<>)).GetGenericArguments()[0];
                 Action<object, object> assign = null;
                 if (list is { IsReadOnly: false })
                     assign = (owner, edited) => ((IList)owner)[index] = edited;
-                if (list == null && !IsReadOnlySet(value, elementType))
+                else if (set != null && !IsReadOnlySet(value, elementType))
                     assign = (owner, edited) =>
                     {
                         if (Equals(item, edited) || NodinExpression.Truth(NodinExpression.Call(owner, "Contains", edited)))
@@ -739,12 +832,52 @@ namespace Nodin.Editor
                         NodinExpression.Call(owner, "Remove", item);
                         NodinExpression.Call(owner, "Add", edited);
                     };
-                var child = node.CollectionElement(index, elementType,
-                    owner => owner is IList current ? current[index] : item, assign);
-                child.Draw(new GUIContent(labelText));
+                else if (sequence != null)
+                    assign = (owner, edited) => ReplaceSequenceElement(owner, sequence.GetGenericTypeDefinition(), index, edited);
 
+                var child = node.CollectionElement(index, elementType, owner =>
+                    owner is IList current ? current[index] :
+                    set != null ? item : ((IEnumerable)owner).Cast<object>().ElementAt(index), assign);
+                DrawListHook(node, options?.OnBeginListElementGUI, index);
+                child.Draw(new GUIContent(labelText));
+                DrawListHook(node, options?.OnEndListElementGUI, index);
             }
             return true;
         }
+
+        private static Type SequenceType(Type type)
+        {
+            for (var current = type; current != null; current = current.BaseType)
+            {
+                if (!current.IsGenericType)
+                    continue;
+                var definition = current.GetGenericTypeDefinition();
+                if (definition == typeof(LinkedList<>) || definition == typeof(Stack<>) || definition == typeof(Queue<>))
+                    return current;
+            }
+            return null;
+        }
+
+        internal static void ReplaceSequenceElement(object collection, Type definition, int index, object value)
+        {
+            if (definition == typeof(LinkedList<>))
+            {
+                var node = collection.GetType().GetProperty("First").GetValue(collection);
+                var nodeType = node.GetType();
+                var next = nodeType.GetProperty("Next");
+                for (var i = 0; i < index; i++)
+                    node = next.GetValue(node);
+                nodeType.GetProperty("Value").SetValue(node, value);
+                return;
+            }
+
+            var items = ((IEnumerable)collection).Cast<object>().ToArray();
+            items[index] = value;
+            NodinExpression.Call(collection, "Clear");
+            var stack = definition == typeof(Stack<>);
+            foreach (var item in stack ? items.Reverse() : items)
+                NodinExpression.Call(collection, stack ? "Push" : "Enqueue", item);
+        }
+
     }
 }

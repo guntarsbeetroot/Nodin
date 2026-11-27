@@ -9,6 +9,7 @@
 /Recordings/
 /.idea/
 !/Packages/com.beetrootlab.nodin/Documentation~/
+!/Packages/com.beetrootlab.nodin/Samples~/
 !/Packages/com.beetrootlab.nodin/Source~/
 *.csproj
 *.sln

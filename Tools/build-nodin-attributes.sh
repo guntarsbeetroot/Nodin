@@ -17,7 +17,7 @@ trap 'rm -rf -- "$build_dir"' EXIT
     -nologo -noconfig -nostdlib -target:library -optimize+ -deterministic \
     "-reference:$scripting_dir/NetStandard/ref/2.1.0/netstandard.dll" \
     "-reference:$scripting_dir/Managed/UnityEngine/UnityEngine.CoreModule.dll" \
-    "-out:$build_dir/Nodin.dll" "$package_dir/Source~/InspectorAttributes.cs"
+    "-out:$build_dir/Nodin.dll" "$package_dir"/Source~/*.cs
 
 if ! cmp -s "$build_dir/Nodin.dll" "$package_dir/Runtime/Nodin.dll"; then
     cp "$build_dir/Nodin.dll" "$package_dir/Runtime/Nodin.dll"

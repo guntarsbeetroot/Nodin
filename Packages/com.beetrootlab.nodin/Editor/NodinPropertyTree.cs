@@ -8,7 +8,7 @@ using Object = UnityEngine.Object;
 
 namespace Nodin.Editor
 {
-    public sealed class NodinPropertyTree : IDisposable
+    public sealed partial class NodinPropertyTree : IDisposable
     {
         private static readonly Dictionary<Type, MemberInfo[]> InspectedMembers = new();
         private readonly Dictionary<string, object> _state = new();
@@ -46,6 +46,12 @@ namespace Nodin.Editor
             Serialization.UpdateIfRequiredOrScript();
             _apply = applyChanges;
             _drawing = true;
+            try { BeginAttributeDraw(); }
+            catch
+            {
+                _drawing = false;
+                throw;
+            }
         }
 
         public void EndDraw()
@@ -55,7 +61,10 @@ namespace Nodin.Editor
             try
             {
                 if (_apply)
+                {
                     ApplyModifiedProperties();
+                    RetirePropertyLifecycles();
+                }
             }
             finally
             {
@@ -97,7 +106,7 @@ namespace Nodin.Editor
 
         internal bool HasCustomization()
         {
-            if (NodinInspectorExtensions.For(Target.GetType()).Any() || Target.GetType().IsDefined(typeof(SearchableAttribute), true))
+            if (NodinInspectorExtensions.For(Target.GetType()).Any() || HasTypeCustomization(Target.GetType()))
                 return true;
             return Children(RootProperty).Any(HasCustomization);
         }
@@ -115,7 +124,7 @@ namespace Nodin.Editor
             if (type == null || !visited.Add(type) || !type.IsDefined(typeof(SerializableAttribute), false) ||
                 type.IsEnum || type.IsPrimitive || type == typeof(string) || typeof(Object).IsAssignableFrom(type))
                 return false;
-            return InspectMembers(type).Length > 0 || Fields(type).Any(field =>
+            return HasTypeCustomization(type) || InspectMembers(type).Length > 0 || Fields(type).Any(field =>
                 field.GetCustomAttributes(false).OfType<Attribute>().Any(a =>
                     a.GetType().Assembly == typeof(ShowInInspectorAttribute).Assembly || NodinInspectorExtensions.HasDrawer(a))
                 || HasNestedCustomization(field.FieldType, visited));
@@ -151,7 +160,7 @@ namespace Nodin.Editor
             if (root || property != null && property.propertyType is SerializedPropertyType.Generic or SerializedPropertyType.ManagedReference)
             {
                 foreach (var child in NodinMemberPath.SerializedChildren(Serialization, property))
-                    if (child.name != "m_Script" || Target is not EditorWindow)
+                    if (!root || ShowRootProperty(child.name))
                         children.Add(FromSerialized(child));
             }
 
@@ -201,12 +210,14 @@ namespace Nodin.Editor
                 foreach (var member in current.GetMembers(NodinExpression.Members).OrderBy(m => m.MetadataToken))
                     if (member switch
                     {
-                        FieldInfo => member.IsDefined(typeof(ShowInInspectorAttribute)),
+                        FieldInfo field => member.IsDefined(typeof(ShowInInspectorAttribute)) ||
+                            field.IsPublic && !field.IsDefined(typeof(HideInInspector)) &&
+                            (field.IsDefined(typeof(TableMatrixAttribute)) || field.IsDefined(typeof(DictionaryDrawerSettingsAttribute))),
                         PropertyInfo property => property.GetIndexParameters().Length == 0 && property.GetMethod != null &&
                                                  member.IsDefined(typeof(ShowInInspectorAttribute)),
                         MethodInfo method => !method.IsSpecialName && !method.ContainsGenericParameters &&
                                              (member.IsDefined(typeof(ButtonAttribute)) || member.IsDefined(typeof(ButtonGroupAttribute)) ||
-                                              member.IsDefined(typeof(OnInspectorGUIAttribute))),
+                                              member.IsDefined(typeof(OnInspectorGUIAttribute)) || member.IsDefined(typeof(ResponsiveButtonGroupAttribute))),
                         _ => false
                     })
                         list.Add(member);
@@ -275,7 +286,7 @@ namespace Nodin.Editor
 
         internal void Perform(string undoName, Object[] targets, Action<Object> action, bool once = false)
         {
-            if (_drawing && (!_apply || EditsDisabled))
+            if (_disposed || _drawing && (!_apply || EditsDisabled))
                 return;
             ApplyModifiedProperties();
             Undo.RecordObjects(targets, undoName);
@@ -300,6 +311,8 @@ namespace Nodin.Editor
         {
             if (_disposed)
                 return;
+            _disposed = true;
+            DisposeAttributeDraw();
             foreach (var editor in _inlineEditors.Values)
                 if (editor != null)
                     Object.DestroyImmediate(editor);
@@ -308,7 +321,6 @@ namespace Nodin.Editor
             ChangesApplied = null;
             if (_ownsSerialization)
                 Serialization.Dispose();
-            _disposed = true;
         }
     }
 
@@ -322,6 +334,7 @@ namespace Nodin.Editor
         private readonly Func<object, object> _read;
         private readonly Action<object, object> _write;
         private readonly Type _valueType;
+        private readonly CollectionChangeInfo? _collectionChange;
         public string Name { get; }
         public string Path { get; }
         internal string Identity => _member == null ? Name : NodinPropertyTree.MemberKey(_member);
@@ -334,7 +347,8 @@ namespace Nodin.Editor
 
         internal NodinPropertyNode(NodinPropertyTree tree, string path, string name, MemberInfo member, Attribute[] attributes,
             NodinPropertyNode parent = null, bool serialized = false, Action<Object> injection = null,
-            Type valueType = null, Func<object, object> read = null, Action<object, object> write = null)
+            Type valueType = null, Func<object, object> read = null, Action<object, object> write = null,
+            CollectionChangeInfo? collectionChange = null)
         {
             _tree = tree;
             Path = path;
@@ -347,6 +361,7 @@ namespace Nodin.Editor
             _valueType = valueType;
             _read = read;
             _write = write;
+            _collectionChange = collectionChange;
         }
 
         internal Type ValueType => _valueType ?? (_member switch
@@ -396,7 +411,17 @@ namespace Nodin.Editor
                         property.boxedValue = value;
                 }
                 else if (CanWrite && !Equals(Value, value))
-                    _tree.Perform("Edit " + Name, target => Write(target, value), IsStatic);
+                    _tree.Perform("Edit " + Name, target =>
+                    {
+                        var element = this;
+                        while (element != null && (element._collectionChange == null || element._parent?.HasCollectionCallbacks != true))
+                            element = element._parent;
+                        if (element?._collectionChange is { } change)
+                            element._parent.CollectionCallback(target, change, true);
+                        Write(target, value);
+                        if (element?._collectionChange is { } changed)
+                            element._parent.CollectionCallback(target, changed, false);
+                    }, IsStatic);
             }
         }
 
@@ -439,9 +464,11 @@ namespace Nodin.Editor
                 NodinMemberPath.For(Path[..dot]).Set(target, owner);
         }
 
-        internal NodinPropertyNode CollectionElement(int index, Type type, Func<object, object> read, Action<object, object> write = null) =>
+        internal NodinPropertyNode CollectionElement(int index, Type type, Func<object, object> read, Action<object, object> write = null,
+            CollectionChangeInfo? change = null) =>
             new(_tree, Path + $"[{index}]", $"Element {index}", null, Array.Empty<Attribute>(), this,
-                valueType: type, read: read, write: write);
+                valueType: type, read: read, write: write,
+                collectionChange: change ?? new CollectionChangeInfo(CollectionChangeType.Replace, index));
 
         private bool IsAncestorValue(object value)
         {

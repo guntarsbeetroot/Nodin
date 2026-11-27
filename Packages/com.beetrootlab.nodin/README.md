@@ -6,6 +6,12 @@ Nodin provides attribute-driven IMGUI inspectors and Editor windows for Unity 60
 
 Add the folder containing this `package.json` through **Window > Package Manager > Install package from disk**, or embed the folder in `Packages/com.beetrootlab.nodin`.
 
+For coding agents working on tools and inspector-configurable UI, link to the [Nodin agent instructions](AGENTS.md) from your project's `AGENTS.md`.
+
+## Examples
+
+Import **Attribute Examples** from Nodin’s **Samples** section in Unity Package Manager. Open **Window > Nodin > Attribute Examples** to try the controls and prefab contexts. The [sample source index](<Samples~/Attribute Examples/README.md>) maps each attribute to its example.
+
 ## Annotate a component
 
 ```csharp
@@ -33,6 +39,18 @@ Use Nodin imports and attributes directly alongside native Unity attributes. `No
 Nodin marks its attributes with `Conditional("UNITY_EDITOR")`, so Unity's player compiler drops the annotations while preserving serialization attributes such as `SerializeField`. Nodin excludes its precompiled attribute assembly from the player after compilation. Application code can use Nodin types as attribute arguments, for example `ButtonSizes.Medium`. Keep code that instantiates or refers to Nodin types at runtime, such as a dropdown provider returning `ValueDropdownItem<T>`, inside an Editor guard or an Editor assembly.
 
 Attributes participate automatically in fallback inspectors for MonoBehaviour and ScriptableObject. Existing specific Unity custom editors retain precedence. Derive an existing custom editor from `Nodin.Editor.NodinBase` and call `base.OnInspectorGUI()` where its attributed controls should appear. Derive an Editor window from `NodinWindow` and override `DrawContent()` to extend its scrollable layout. Call `base.DrawContent()` where its serialized and attributed members should appear.
+
+## Attribute controls
+
+Use `ShowIn`, `HideIn`, `EnableIn`, and `DisableIn` with a `PrefabKind` bitmask to target prefab assets, variants, nested instances, scene instances, or ordinary objects. `RequiredIn` validates required values in those contexts. `DisallowModificationsIn` also reports existing prefab overrides.
+
+Layout attributes with the same group path share a group. Give a conditional group its own path when its condition is controlled by a separate toggle group.
+
+Use `OnInspectorInit` and `OnInspectorDispose` on parameterless methods or give the attribute a named callback on a field. `OnStateUpdate` can call a method that accepts `NodinPropertyState`. Set `Visible`, `Enabled`, or `Expanded` on that state. `OnCollectionChanged` can pass `CollectionChangeInfo` and the collection to before and after callbacks around inspector edits.
+
+Use `AssetList` and `AssetSelector` to choose project objects by filters. `ChildGameObjectsOnly` restricts scene references to the host hierarchy. Named `ColorPalette` sources can return colors or HTML color strings. Use `TypeFilter` and `PolymorphicDrawerSettings` to customize managed-reference selection for `SerializeReference` fields. Use `ShowInInspector` to expose reflected `System.Type` fields.
+
+`PropertyRange`, `ProgressBar`, and `MinMaxSlider` can resolve bounds from members or expressions. `Unit` can add a suffix or convert using an explicit multiplier. `DictionaryDrawerSettings` and `TableMatrix` can edit reflected collections exposed with `ShowInInspector`. Persistence and Undo for those collections depend on how the host serializes them. Nodin does not add a serialization format.
 
 ## Embed properties and register extensions
 
