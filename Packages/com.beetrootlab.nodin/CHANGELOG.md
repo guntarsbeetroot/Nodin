@@ -10,6 +10,7 @@
 ### Fixed
 
 - Foldout arrows now stay inside `TabGroup` panels.
+- Adjacent tabs in a `TabGroup` share a single divider.
 
 ## [1.0.0]
 

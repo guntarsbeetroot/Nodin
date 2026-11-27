@@ -8,6 +8,8 @@ namespace Nodin.Editor
 {
     internal static class NodinInspectorLayout
     {
+        private static GUIStyle _tabLabel;
+
         private sealed class Group
         {
             internal string Name;
@@ -208,21 +210,41 @@ namespace Nodin.Editor
 
         private static int DrawTabs(int selected, string[] names)
         {
-            var style = EditorStyles.toolbarButton;
+            var style = _tabLabel ??= new GUIStyle(EditorStyles.label)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                clipping = TextClipping.Clip,
+                padding = new RectOffset(4, 4, 0, 0)
+            };
             var contents = names.Select(name => new GUIContent(name, name)).ToArray();
             var minimum = contents.Select(content => style.CalcSize(content).x + 6).ToArray();
             var rect = EditorGUILayout.GetControlRect(false, 22);
-            var spacing = Mathf.Clamp((rect.width - minimum.Sum()) / Mathf.Max(1, names.Length - 1), 2, 8);
-            var available = Mathf.Max(0, rect.width - (names.Length - 1) * spacing);
-            var widths = TabWidths(minimum, available);
+            var widths = TabWidths(minimum, rect.width);
+            var divider = new Color(0, 0, 0, EditorGUIUtility.isProSkin ? 0.42f : 0.25f);
+            var inactive = new Color(0, 0, 0, 0.15f);
+            var pixelsPerPoint = EditorGUIUtility.pixelsPerPoint;
             var x = rect.x;
             var next = selected;
             for (var i = 0; i < contents.Length; i++)
             {
-                var tabRect = new Rect(x, rect.y, widths[i], 21);
-                if (GUI.Toggle(tabRect, i == selected, contents[i], style) && i != selected)
+                var left = Mathf.Round(x * pixelsPerPoint) / pixelsPerPoint;
+                x += widths[i];
+                var right = Mathf.Round(x * pixelsPerPoint) / pixelsPerPoint;
+                var tabRect = new Rect(left, rect.y, right - left, 21);
+                var active = i == selected;
+                if (Event.current.type == EventType.Repaint && tabRect.width > 0)
+                {
+                    if (!active)
+                    {
+                        EditorGUI.DrawRect(tabRect, inactive);
+                        EditorGUI.DrawRect(new Rect(left, tabRect.yMax - 1, tabRect.width, 1), divider);
+                    }
+                    // Each shared edge belongs to the tab on its right.
+                    if (i > 0)
+                        EditorGUI.DrawRect(new Rect(left, tabRect.y, Mathf.Min(1, tabRect.width), tabRect.height), divider);
+                }
+                if (GUI.Toggle(tabRect, active, contents[i], style) && !active)
                     next = i;
-                x += widths[i] + spacing;
             }
             return next;
         }
